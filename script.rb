@@ -1,3 +1,4 @@
+require 'dotenv/load'
 require 'httparty'
 require 'nokogiri'
 require 'net/http'
@@ -6,13 +7,19 @@ require 'logger'
 
 CONFIG = {
   base_url:     "https://ge.globo.com/sp/santos-e-regiao/futebol/times/santos/",
-  ai_model:     "llama3",
-  ai_host:      "localhost",
-  ai_port:      11_434,
+  ai_model:     ENV.fetch("AI_MODEL", "llama3"),
+  ai_host:      ENV.fetch("AI_HOST", "localhost"),
+  ai_port:      ENV.fetch("AI_PORT", "11434").to_i,
   ai_timeout:   300,
   max_chars:    6_000,
   max_retries:  3,
-  retry_delay:  2
+  retry_delay:  2,
+  max_articles: ENV.fetch("MAX_ARTICLES", "2").to_i,
+  summary_prompt: ENV.fetch("SUMMARY_PROMPT", "Resuma de forma clara e objetiva:\n\n%s"),
+  output_file:  ENV.fetch("OUTPUT_FILE", "/tmp/noticias-#{Time.now.strftime('%d-%m-%Y')}.txt"),
+  notion_token:   ENV.fetch("NOTION_TOKEN")   { raise "Variável de ambiente NOTION_TOKEN não definida" },
+  notion_page_id: ENV.fetch("NOTION_PAGE_ID") { raise "Variável de ambiente NOTION_PAGE_ID não definida" },
+  notify:       ENV.fetch("NOTIFY", "notion").split(",").map(&:to_sym)
 }.freeze
 
 SEPARATOR = "=" * 90
@@ -60,10 +67,83 @@ end
 
 module Reporter
   def self.print_article(data)
-    puts "\n#{SEPARATOR}"
-    puts "\n#{data[:title].upcase}"
-    puts data[:subtitle]
-    puts data[:summary]
+    LOGGER.info(SEPARATOR)
+    LOGGER.info(data[:title].upcase)
+    LOGGER.info(data[:subtitle].to_s)
+    LOGGER.info(data[:summary])
+  end
+
+  def self.save_to_txt(results, path: CONFIG[:output_file])
+    content = results.map do |data|
+      <<~BLOCK
+        #{SEPARATOR}
+
+        #{data[:title].upcase}
+        #{data[:subtitle]}
+        #{data[:summary]}
+      BLOCK
+    end.join("\n")
+
+    File.write(path, content)
+    LOGGER.info("Resultados salvos em: #{path}")
+  end
+
+  def self.save_to_notion(results)
+    children = results.flat_map do |data|
+      [
+        {
+          object: "block",
+          type: "heading_2",
+          heading_2: {
+            rich_text: [{ type: "text", text: { content: data[:title] }, annotations: { bold: true } }]
+          }
+        },
+        {
+          object: "block",
+          type: "paragraph",
+          paragraph: {
+            rich_text: [{ type: "text", text: { content: data[:subtitle].to_s }, annotations: { italic: true, color: "gray" } }]
+          }
+        },
+        {
+          object: "block",
+          type: "paragraph",
+          paragraph: {
+            rich_text: [{ type: "text", text: { content: "Resumo" }, annotations: { bold: true } }]
+          }
+        },
+        *data[:summary].chars.each_slice(2000).map(&:join).map do |chunk|
+          {
+            object: "block",
+            type: "paragraph",
+            paragraph: { rich_text: [{ type: "text", text: { content: chunk } }] }
+          }
+        end,
+        { object: "block", type: "divider", divider: {} }
+      ]
+    end
+
+    response = HTTParty.post(
+      "https://api.notion.com/v1/pages",
+      headers: {
+        "Authorization"  => "Bearer #{CONFIG[:notion_token]}",
+        "Notion-Version" => "2022-06-28",
+        "Content-Type"   => "application/json"
+      },
+      body: {
+        parent: { page_id: CONFIG[:notion_page_id] },
+        properties: {
+          title: {
+            title: [{ text: { content: "Notícias Santos - #{Time.now.strftime('%d-%m-%Y')}" } }]
+          }
+        },
+        children: children
+      }.to_json
+    )
+
+    LOGGER.info("Notion status: #{response.code}")
+    LOGGER.info("Salvo no Notion!") if response.code == 200
+    LOGGER.error("Notion error: #{response.body}") unless response.code == 200
   end
 end
 
@@ -79,7 +159,7 @@ class Pipeline
 
     links = @scraper.article_links
 
-    links.each do |link|
+    links.first(CONFIG[:max_articles]).each do |link|
       result = process_article(link)
       next unless result
 
@@ -87,8 +167,13 @@ class Pipeline
       Reporter.print_article(result)
     end
 
-    puts "\n#{SEPARATOR}\n\n"
+    LOGGER.info(SEPARATOR)
     LOGGER.info("Script finalizado! #{@results.size}/#{links.size} matérias processadas.")
+
+    return if @results.empty?
+
+    Reporter.save_to_txt(@results)    if CONFIG[:notify].include?(:txt)
+    Reporter.save_to_notion(@results) if CONFIG[:notify].include?(:notion)
   end
 
   private
@@ -100,7 +185,7 @@ class Pipeline
     summary = summarize_safely(article)
     return unless summary
 
-    article.merge(summary:)
+    article.merge(summary: summary)
   rescue StandardError => e
     LOGGER.error("Erro inesperado em #{link}: #{e.message}")
     nil
@@ -149,14 +234,16 @@ class Scraper
     html = Network.get(url)
     doc  = Nokogiri::HTML(html)
 
-    title = doc.at_css("h1")&.text&.strip || "(sem título)"
+    title    = doc.at_css("h1")&.text&.strip || "(sem título)"
     subtitle = doc.at_css(".content-head__subtitle")&.text&.strip
 
-    paragraphs = doc.css(".mc-article-body p")
+    # Seletor com fallback — .mc-article-body é específico do GE e pode mudar
+    paragraphs = doc.css(".mc-article-body p, article p")
                     .map { |p| p.text.strip }
                     .reject(&:empty?)
+                    .uniq
 
-    { url:, title:, subtitle:, paragraphs: }
+    { url: url, title: title, subtitle: subtitle, paragraphs: paragraphs }
   end
 end
 
@@ -165,6 +252,7 @@ class Summarizer
     @uri     = URI("http://#{CONFIG[:ai_host]}:#{CONFIG[:ai_port]}/api/chat")
     @model   = CONFIG[:ai_model]
     @timeout = CONFIG[:ai_timeout]
+    @prompt  = CONFIG[:summary_prompt]
   end
 
   def call(text, retries: CONFIG[:max_retries])
@@ -172,7 +260,7 @@ class Summarizer
 
     begin
       attempts += 1
-      body = build_request_body(text)
+      body     = build_request_body(text)
       response = post(body)
       parse_response(response)
 
@@ -191,7 +279,7 @@ class Summarizer
   def build_request_body(text)
     {
       model:    @model,
-      messages: [{ role: "user", content: "Resuma de forma clara e objetiva:\n\n#{text}" }],
+      messages: [{ role: "user", content: @prompt % text }],
       stream:   false
     }.to_json
   end
