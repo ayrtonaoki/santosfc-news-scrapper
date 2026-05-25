@@ -2,7 +2,26 @@ require 'dotenv/load'
 require 'logger'
 
 CONFIG = {
-  base_url:       "https://ge.globo.com/sp/santos-e-regiao/futebol/times/santos/",
+  sources:        [
+    {
+      name: "GE",
+      base_url: "https://ge.globo.com/sp/santos-e-regiao/futebol/times/santos/",
+      link_pattern: %r{/sp/santos-e-regiao/futebol/times/santos/noticia/},
+      link_suffix: ".ghtml",
+      link_base_url: "https://ge.globo.com",
+      subtitle_selector: ".content-head__subtitle",
+      paragraph_selector: ".mc-article-body p, article p"
+    },
+    {
+      name: "Diário do Peixe",
+      base_url: "https://www.diariodopeixe.com.br/",
+      link_pattern: %r{^https://www\.diariodopeixe\.com\.br/noticias/.+},
+      link_suffix: "/",
+      link_base_url: "https://www.diariodopeixe.com.br",
+      subtitle_selector: nil,
+      paragraph_selector: ".post-content p, .fusion-post-content p, article p"
+    }
+  ],
   ai_model:       ENV.fetch("AI_MODEL", "llama3"),
   ai_host:        ENV.fetch("AI_HOST", "localhost"),
   ai_port:        ENV.fetch("AI_PORT", "11434").to_i,

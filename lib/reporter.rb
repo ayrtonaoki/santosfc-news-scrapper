@@ -4,6 +4,7 @@ require_relative '../config'
 module Reporter
   def self.print_article(data)
     LOGGER.info(SEPARATOR)
+    LOGGER.info("Fonte: #{data[:source]}")
     LOGGER.info(data[:title].upcase)
     LOGGER.info(data[:subtitle].to_s)
     LOGGER.info(data[:summary])
@@ -14,6 +15,7 @@ module Reporter
       <<~BLOCK
         #{SEPARATOR}
 
+        Fonte: #{data[:source]}
         #{data[:title].upcase}
         #{data[:subtitle]}
         #{data[:summary]}
@@ -31,7 +33,7 @@ module Reporter
           object: "block",
           type: "heading_2",
           heading_2: {
-            rich_text: [{ type: "text", text: { content: data[:title] }, annotations: { bold: true } }]
+            rich_text: [{ type: "text", text: { content: "[#{data[:source]}] #{data[:title]}" }, annotations: { bold: true } }]
           }
         },
         {

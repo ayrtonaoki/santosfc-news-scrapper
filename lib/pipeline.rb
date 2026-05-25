@@ -6,7 +6,6 @@ require_relative 'reporter'
 
 class Pipeline
   def initialize
-    @scraper    = Scraper.new(CONFIG[:base_url])
     @summarizer = Summarizer.new
     @results    = []
   end
@@ -14,18 +13,23 @@ class Pipeline
   def run
     LOGGER.info("Iniciando...")
 
-    links = @scraper.article_links
+    CONFIG[:sources].each do |source|
+      scraper = Scraper.new(source)
+      links = scraper.article_links
 
-    links.first(CONFIG[:max_articles]).each do |link|
-      result = process_article(link)
-      next unless result
+      links.first(CONFIG[:max_articles]).each do |link|
+        result = process_article(scraper, link)
+        next unless result
 
-      @results << result
-      Reporter.print_article(result)
+        @results << result
+        Reporter.print_article(result)
+      end
+
+      LOGGER.info("#{source[:name]}: #{@results.count { |result| result[:source] == source[:name] }}/#{links.size} matérias processadas.")
     end
 
     LOGGER.info(SEPARATOR)
-    LOGGER.info("Script finalizado! #{@results.size}/#{links.size} matérias processadas.")
+    LOGGER.info("Script finalizado! #{@results.size} matérias processadas.")
 
     return if @results.empty?
 
@@ -35,8 +39,8 @@ class Pipeline
 
   private
 
-  def process_article(link)
-    article = scrape_safely(link)
+  def process_article(scraper, link)
+    article = scrape_safely(scraper, link)
     return unless article
 
     summary = summarize_safely(article)
@@ -48,8 +52,8 @@ class Pipeline
     nil
   end
 
-  def scrape_safely(link)
-    @scraper.scrape_article(link)
+  def scrape_safely(scraper, link)
+    scraper.scrape_article(link)
   rescue StandardError => e
     LOGGER.error("Falha ao baixar matéria: #{e.message} | #{link}")
     nil
